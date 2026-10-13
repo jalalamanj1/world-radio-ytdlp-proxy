@@ -127,6 +127,28 @@ const server = http.createServer(async (req, res) => {
       const id = (url.searchParams.get("id") || "").trim();
       return await handleStream(req, res, id);
     }
+    // Dailymotion: resolve the (signed) HLS url with yt-dlp, then redirect the
+    // browser straight to the CDN (which sends CORS *, so hls.js can play it).
+    const dm = url.pathname.match(/^\/dm\/([\w-]+)\.m3u8$/);
+    if (dm) {
+      const out = await runYt([
+        "-f",
+        "bestaudio/best",
+        "--no-playlist",
+        "--no-warnings",
+        "-g",
+        `https://www.dailymotion.com/video/${dm[1]}`,
+      ]);
+      const mediaUrl = out
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .find((u) => /\.m3u8(\?|$)/i.test(u) || /dmcdn|\.mp4(\?|$)/i.test(u)) || out.trim().split(/\r?\n/)[0];
+      if (!mediaUrl) return sendJson(res, 502, { ok: false, error: "no dailymotion stream" });
+      res.writeHead(302, { Location: mediaUrl });
+      res.end();
+      return;
+    }
     sendJson(res, 404, { ok: false, error: "not found" });
   } catch (e) {
     if (!res.headersSent) sendJson(res, 502, { ok: false, error: String(e?.message || e) });
