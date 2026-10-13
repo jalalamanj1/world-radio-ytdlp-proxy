@@ -1,0 +1,10 @@
+{
+  "name": "world-radio-ytdlp",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "yt-dlp proxy for World Radio (YouTube search + audio streaming).",
+  "scripts": {
+    "start": "node server.mjs"
+  }
+}
