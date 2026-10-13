@@ -56,7 +56,7 @@ async function handleSearch(res, query, limit) {
   ]);
   const data = JSON.parse(out);
   const items = (data.entries || [])
-    .filter((e) => e && e.id)
+    .filter((e) => e && e.id && /^[\w-]{11}$/.test(String(e.id)) && e.title)
     .map((e) => ({
       id: e.id,
       title: e.title || "Untitled",
@@ -122,6 +122,31 @@ const server = http.createServer(async (req, res) => {
       const q = (url.searchParams.get("q") || "").trim();
       const limit = Number(url.searchParams.get("limit") || 12);
       return await handleSearch(res, q, limit);
+    }
+    // YouTube Music search (songs/artists) via yt-dlp.
+    if (url.pathname === "/ytmsearch") {
+      const q = (url.searchParams.get("q") || "").trim();
+      const limit = Number(url.searchParams.get("limit") || 20);
+      if (!q) return sendJson(res, 400, { ok: false, error: "q required" });
+      const out = await runYt([
+        `https://music.youtube.com/search?q=${encodeURIComponent(q)}`,
+        "--dump-single-json",
+        "--flat-playlist",
+        "--skip-download",
+        "--no-warnings",
+      ]);
+      const data = JSON.parse(out);
+      const items = (data.entries || [])
+        .filter((e) => e && e.id && /^[\w-]{11}$/.test(String(e.id)) && e.title)
+        .slice(0, Math.min(40, Math.max(1, limit)))
+        .map((e) => ({
+          id: e.id,
+          title: e.title || "Untitled",
+          uploader: e.uploader || e.channel || e.artist || "",
+          duration: e.duration || undefined,
+          thumbnail: `https://i.ytimg.com/vi/${e.id}/hqdefault.jpg`,
+        }));
+      return sendJson(res, 200, { ok: true, items });
     }
     if (url.pathname === "/stream") {
       const id = (url.searchParams.get("id") || "").trim();
