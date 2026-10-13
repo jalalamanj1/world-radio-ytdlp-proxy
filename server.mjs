@@ -74,6 +74,8 @@ async function handleStream(req, res, id) {
   const meta = await runYt([
     "-f",
     "bestaudio[ext=m4a]/bestaudio",
+    "--extractor-args",
+    "youtube:player_client=default,tv_embedded,web_embedded,ios,android_vr,mweb",
     "--no-playlist",
     "--no-warnings",
     "--print",
