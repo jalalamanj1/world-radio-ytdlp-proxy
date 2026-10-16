@@ -26,6 +26,7 @@
 
 import http from "node:http";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
@@ -50,8 +51,18 @@ const CLIENT_SETS = [
   "youtube:player_client=default,web_safari",
   "youtube:player_client=tv_embedded,web_embedded,mweb,android_vr",
 ];
-// Optional Netscape cookies.txt path (helps when YouTube bot-checks the IP).
-const COOKIES = process.env.YTDLP_COOKIES || "";
+// Netscape cookies.txt path. Needed when YouTube bot-checks a datacenter IP
+// ("Sign in to confirm you're not a bot"). Render Secret Files mount at
+// /etc/secrets/<name>, so dropping a secret file named cookies.txt is enough.
+const COOKIES = process.env.YTDLP_COOKIES || "/etc/secrets/cookies.txt";
+function cookieArgs() {
+  try {
+    return COOKIES && existsSync(COOKIES) ? ["--cookies", COOKIES] : [];
+  } catch {
+    return [];
+  }
+}
+const cookiesActive = () => cookieArgs().length > 0;
 
 const MAX_ENTRIES = 500;
 
@@ -124,7 +135,7 @@ async function resolveAudio(id) {
           "--print",
           "%(url)s|%(ext)s",
         ];
-        if (COOKIES) args.push("--cookies", COOKIES);
+        args.push(...cookieArgs());
         args.push(page);
         const meta = await runYt(args);
         const line = meta.trim();
@@ -273,6 +284,7 @@ const server = http.createServer(async (req, res) => {
         searchCache: searchCache.size,
         inflight: inflight.size,
         prefetch: PREFETCH,
+        cookies: cookiesActive(),
       });
     }
     if (url.pathname === "/search") {
