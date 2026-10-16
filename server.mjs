@@ -4,9 +4,22 @@
 // can search YouTube and stream the audio of any video. It exists because a
 // browser cannot extract YouTube audio directly (CORS + signature + IP locks).
 //
-//   GET /health                      -> { ok: true }
+//   GET /health                      -> { ok, resolveCache, searchCache, ... }
 //   GET /search?q=QUERY&limit=N      -> { ok, items: [{ id, title, uploader, duration, thumbnail }] }
+//   GET /ytmsearch?q=QUERY&limit=N   -> same shape, via YouTube Music
 //   GET /stream?id=VIDEOID           -> streams the best audio (supports Range/seek)
+//   GET /dm/{ID}.m3u8                -> 302 to a signed Dailymotion HLS url
+//
+// Resolved media URLs and search results are cached in memory, so repeat plays,
+// in-track seeks and identical queries skip the slow (~seconds) yt-dlp run.
+//
+// Env:
+//   PORT             listen port (default 8080)
+//   YTDLP_PATH       yt-dlp binary, or an interpreter (e.g. python)
+//   YTDLP_ARGS       extra args before the command (e.g. "-m yt_dlp")
+//   RESOLVE_TTL_MS   media-url cache lifetime (default 1h)
+//   SEARCH_TTL_MS    search-result cache lifetime (default 10m)
+//   PREFETCH         "1" to warm the top search result's stream in the background
 //
 // Requires the `yt-dlp` binary on PATH (see Dockerfile / README).
 
@@ -20,11 +33,38 @@ const YTDLP = process.env.YTDLP_PATH || "yt-dlp";
 // Optional extra args before the command (e.g. YTDLP_PATH=python YTDLP_ARGS="-m yt_dlp").
 const YTDLP_ARGS = (process.env.YTDLP_ARGS || "").split(" ").filter(Boolean);
 
+// A resolved googlevideo URL stays valid for a few hours; an hour is safe.
+const RESOLVE_TTL_MS = Number(process.env.RESOLVE_TTL_MS || 60 * 60 * 1000);
+// Search results (e.g. the constant "top hits" query) are reused for a while.
+const SEARCH_TTL_MS = Number(process.env.SEARCH_TTL_MS || 10 * 60 * 1000);
+// Warm the top search result so the first tap starts almost instantly.
+const PREFETCH = /^(1|true|yes)$/i.test(process.env.PREFETCH || "");
+
+const MAX_ENTRIES = 500;
+
+/** videoId -> { url, ext, expiresAt } */
+const resolveCache = new Map();
+/** searchKey -> { items, expiresAt } */
+const searchCache = new Map();
+/** videoId -> in-flight resolve promise (dedupes concurrent resolves) */
+const inflight = new Map();
+
+function cacheSet(map, key, value) {
+  if (map.size >= MAX_ENTRIES) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+  map.set(key, value);
+}
+
 function applyCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Range,Content-Type");
-  res.setHeader("Access-Control-Expose-Headers", "Content-Length,Content-Range,Accept-Ranges,Content-Type");
+  res.setHeader(
+    "Access-Control-Expose-Headers",
+    "Content-Length,Content-Range,Accept-Ranges,Content-Type,X-Cache",
+  );
 }
 
 function sendJson(res, code, obj) {
@@ -44,58 +84,92 @@ function runYt(args) {
   });
 }
 
-async function handleSearch(res, query, limit) {
-  if (!query) return sendJson(res, 400, { ok: false, error: "q required" });
-  const n = Math.min(30, Math.max(1, limit));
-  const out = await runYt([
-    `ytsearch${n}:${query}`,
-    "--dump-single-json",
-    "--flat-playlist",
-    "--no-warnings",
-    "--skip-download",
-  ]);
-  const data = JSON.parse(out);
-  const items = (data.entries || [])
-    .filter((e) => e && e.id && /^[\w-]{11}$/.test(String(e.id)) && e.title)
-    .map((e) => ({
-      id: e.id,
-      title: e.title || "Untitled",
-      uploader: e.uploader || e.channel || "",
-      duration: e.duration || undefined,
-      thumbnail: `https://i.ytimg.com/vi/${e.id}/hqdefault.jpg`,
-    }));
-  sendJson(res, 200, { ok: true, items });
+// ---------------------------------------------------------------------------
+// Resolve a video's best audio-only stream, cached + de-duplicated.
+// ---------------------------------------------------------------------------
+
+async function resolveAudio(id) {
+  const cached = resolveCache.get(id);
+  if (cached && cached.expiresAt > Date.now()) return { ...cached, hit: true };
+  const pending = inflight.get(id);
+  if (pending) return pending;
+
+  const task = (async () => {
+    const page = `https://www.youtube.com/watch?v=${id}`;
+    // Prefer m4a/AAC for widest browser support.
+    const meta = await runYt([
+      "-f",
+      "bestaudio[ext=m4a]/bestaudio",
+      "--extractor-args",
+      "youtube:player_client=default,tv_embedded,web_embedded,ios,android_vr,mweb",
+      "--no-playlist",
+      "--no-warnings",
+      "--print",
+      "%(url)s|%(ext)s",
+      page,
+    ]);
+    const line = meta.trim();
+    // Split on the LAST "|" so a "|" inside the url can't corrupt the parse.
+    const sep = line.lastIndexOf("|");
+    const url = (sep >= 0 ? line.slice(0, sep) : line).trim();
+    const ext = (sep >= 0 ? line.slice(sep + 1) : "").trim();
+    if (!url) throw new Error("no stream resolved");
+    const entry = { url, ext, expiresAt: Date.now() + RESOLVE_TTL_MS, hit: false };
+    cacheSet(resolveCache, id, entry);
+    return entry;
+  })();
+
+  inflight.set(id, task);
+  try {
+    return await task;
+  } finally {
+    inflight.delete(id);
+  }
 }
 
-async function handleStream(req, res, id) {
-  if (!id || !/^[\w-]{6,20}$/.test(id)) return sendJson(res, 400, { ok: false, error: "invalid id" });
-  const page = `https://www.youtube.com/watch?v=${id}`;
-  // Resolve the best audio-only stream (prefer m4a/AAC for widest browser support).
-  const meta = await runYt([
-    "-f",
-    "bestaudio[ext=m4a]/bestaudio",
-    "--extractor-args",
-    "youtube:player_client=default,tv_embedded,web_embedded,ios,android_vr,mweb",
-    "--no-playlist",
-    "--no-warnings",
-    "--print",
-    "%(url)s|%(ext)s",
-    page,
-  ]);
-  const [mediaUrl, ext] = meta.trim().split("|");
-  if (!mediaUrl) return sendJson(res, 502, { ok: false, error: "no stream resolved" });
+function contentTypeFor(ext) {
+  return ext === "m4a"
+    ? "audio/mp4"
+    : ext === "webm"
+      ? "audio/webm"
+      : ext === "mp3"
+        ? "audio/mpeg"
+        : "application/octet-stream";
+}
 
-  const type =
-    ext === "m4a" ? "audio/mp4" : ext === "webm" ? "audio/webm" : ext === "mp3" ? "audio/mpeg" : "application/octet-stream";
-
-  const range = req.headers.range;
-  const upstream = await fetch(mediaUrl, {
+function fetchUpstream(mediaUrl, range) {
+  return fetch(mediaUrl, {
     headers: {
       ...(range ? { Range: range } : {}),
       "User-Agent": "Mozilla/5.0 (compatible; WorldRadioProxy/1.0)",
     },
   });
-  const headers = { "Content-Type": type, "Accept-Ranges": "bytes" };
+}
+
+async function handleStream(req, res, id) {
+  if (!id || !/^[\w-]{6,20}$/.test(id)) return sendJson(res, 400, { ok: false, error: "invalid id" });
+
+  let resolved = await resolveAudio(id);
+  let upstream = await fetchUpstream(resolved.url, req.headers.range);
+  let cache = resolved.hit ? "HIT" : "MISS";
+
+  // A cached URL can expire (403/410) or the CDN can hiccup; refresh once.
+  if (upstream.status === 403 || upstream.status === 410 || upstream.status >= 500) {
+    resolveCache.delete(id);
+    try {
+      resolved = await resolveAudio(id);
+      upstream = await fetchUpstream(resolved.url, req.headers.range);
+      cache = "REFRESH";
+    } catch {
+      /* keep the original upstream response below */
+    }
+  }
+
+  const headers = {
+    "Content-Type": contentTypeFor(resolved.ext),
+    "Accept-Ranges": "bytes",
+    "X-Cache": cache,
+  };
   const len = upstream.headers.get("content-length");
   if (len) headers["Content-Length"] = len;
   const cr = upstream.headers.get("content-range");
@@ -108,6 +182,56 @@ async function handleStream(req, res, id) {
   await pipeline(Readable.fromWeb(upstream.body), res);
 }
 
+// ---------------------------------------------------------------------------
+// Search (cached), shared by /search and /ytmsearch.
+// ---------------------------------------------------------------------------
+
+function normalizeItems(entries, limit) {
+  return (entries || [])
+    .filter((e) => e && e.id && /^[\w-]{11}$/.test(String(e.id)) && e.title)
+    .slice(0, limit)
+    .map((e) => ({
+      id: e.id,
+      title: e.title || "Untitled",
+      uploader: e.uploader || e.channel || e.artist || "",
+      duration: e.duration || undefined,
+      thumbnail: `https://i.ytimg.com/vi/${e.id}/hqdefault.jpg`,
+    }));
+}
+
+async function searchYt(query, limit, music) {
+  const n = Math.min(music ? 40 : 30, Math.max(1, limit));
+  const target = music
+    ? `https://music.youtube.com/search?q=${encodeURIComponent(query)}`
+    : `ytsearch${n}:${query}`;
+  const out = await runYt([target, "--dump-single-json", "--flat-playlist", "--no-warnings", "--skip-download"]);
+  const data = JSON.parse(out);
+  return normalizeItems(data.entries, n);
+}
+
+async function cachedSearch(key, produce) {
+  const cached = searchCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return { items: cached.items, hit: true };
+  const items = await produce();
+  cacheSet(searchCache, key, { items, expiresAt: Date.now() + SEARCH_TTL_MS });
+  return { items, hit: false };
+}
+
+function maybePrefetch(items) {
+  if (!PREFETCH || items.length === 0) return;
+  const id = items[0]?.id;
+  if (!id || resolveCache.has(id) || inflight.has(id)) return;
+  resolveAudio(id).catch(() => {});
+}
+
+async function handleSearch(req, res, query, limit, music) {
+  if (!query) return sendJson(res, 400, { ok: false, error: "q required" });
+  const { items, hit } = await cachedSearch(`${music ? "m" : "s"}:${limit}:${query}`, () => searchYt(query, limit, music));
+  res.setHeader("X-Cache", hit ? "HIT" : "MISS");
+  maybePrefetch(items);
+  sendJson(res, 200, { ok: true, items });
+}
+
 const server = http.createServer(async (req, res) => {
   applyCors(res);
   if (req.method === "OPTIONS") {
@@ -117,36 +241,25 @@ const server = http.createServer(async (req, res) => {
   }
   const url = new URL(req.url || "/", "http://localhost");
   try {
-    if (url.pathname === "/health") return sendJson(res, 200, { ok: true });
+    if (url.pathname === "/health") {
+      return sendJson(res, 200, {
+        ok: true,
+        resolveCache: resolveCache.size,
+        searchCache: searchCache.size,
+        inflight: inflight.size,
+        prefetch: PREFETCH,
+      });
+    }
     if (url.pathname === "/search") {
       const q = (url.searchParams.get("q") || "").trim();
       const limit = Number(url.searchParams.get("limit") || 12);
-      return await handleSearch(res, q, limit);
+      return await handleSearch(req, res, q, limit, false);
     }
     // YouTube Music search (songs/artists) via yt-dlp.
     if (url.pathname === "/ytmsearch") {
       const q = (url.searchParams.get("q") || "").trim();
       const limit = Number(url.searchParams.get("limit") || 20);
-      if (!q) return sendJson(res, 400, { ok: false, error: "q required" });
-      const out = await runYt([
-        `https://music.youtube.com/search?q=${encodeURIComponent(q)}`,
-        "--dump-single-json",
-        "--flat-playlist",
-        "--skip-download",
-        "--no-warnings",
-      ]);
-      const data = JSON.parse(out);
-      const items = (data.entries || [])
-        .filter((e) => e && e.id && /^[\w-]{11}$/.test(String(e.id)) && e.title)
-        .slice(0, Math.min(40, Math.max(1, limit)))
-        .map((e) => ({
-          id: e.id,
-          title: e.title || "Untitled",
-          uploader: e.uploader || e.channel || e.artist || "",
-          duration: e.duration || undefined,
-          thumbnail: `https://i.ytimg.com/vi/${e.id}/hqdefault.jpg`,
-        }));
-      return sendJson(res, 200, { ok: true, items });
+      return await handleSearch(req, res, q, limit, true);
     }
     if (url.pathname === "/stream") {
       const id = (url.searchParams.get("id") || "").trim();
@@ -182,5 +295,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`World Radio yt-dlp proxy listening on :${PORT}`);
+  console.log(`World Radio yt-dlp proxy listening on :${PORT}${PREFETCH ? " (prefetch on)" : ""}`);
 });

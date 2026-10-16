@@ -7,9 +7,27 @@ streaming full audio (the browser can't extract YouTube audio directly).
 
 | Method | Path | Description |
 | --- | --- | --- |
-| GET | `/health` | `{ "ok": true }` |
+| GET | `/health` | `{ ok, resolveCache, searchCache, inflight, prefetch }` |
 | GET | `/search?q=QUERY&limit=N` | `{ ok, items: [{ id, title, uploader, duration, thumbnail }] }` |
+| GET | `/ytmsearch?q=QUERY&limit=N` | Same shape, via YouTube Music |
 | GET | `/stream?id=VIDEOID` | Streams the best audio (supports `Range` = seeking) |
+| GET | `/dm/{ID}.m3u8` | 302-redirects to a signed Dailymotion HLS url |
+
+## Caching
+
+Resolved media URLs and search results are kept in memory, so the slow yt-dlp
+extraction runs once per track/query instead of on every play, seek or repeat
+search. A stale (expired) media URL is refreshed automatically on the next
+request. `/stream` responses report `X-Cache: HIT | MISS | REFRESH`.
+
+| Env | Default | Meaning |
+| --- | --- | --- |
+| `PORT` | `8080` | Listen port |
+| `YTDLP_PATH` | `yt-dlp` | yt-dlp binary, or an interpreter (e.g. `python`) |
+| `YTDLP_ARGS` | — | Extra args before the command (e.g. `-m yt_dlp`) |
+| `RESOLVE_TTL_MS` | `3600000` | Media-url cache lifetime |
+| `SEARCH_TTL_MS` | `600000` | Search-result cache lifetime |
+| `PREFETCH` | off | `1` warms the top search result's stream in the background |
 
 ## Deploy on Render (free, ~1 minute)
 
