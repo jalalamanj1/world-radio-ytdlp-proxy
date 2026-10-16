@@ -26,7 +26,9 @@
 
 import http from "node:http";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { copyFileSync, existsSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
@@ -54,13 +56,27 @@ const CLIENT_SETS = [
 // Netscape cookies.txt path. Needed when YouTube bot-checks a datacenter IP
 // ("Sign in to confirm you're not a bot"). Render Secret Files mount at
 // /etc/secrets/<name>, so dropping a secret file named cookies.txt is enough.
-const COOKIES = process.env.YTDLP_COOKIES || "/etc/secrets/cookies.txt";
-function cookieArgs() {
+const COOKIES_SRC = process.env.YTDLP_COOKIES || "/etc/secrets/cookies.txt";
+let cookiesPath = null;
+function ensureCookies() {
+  if (cookiesPath !== null) return cookiesPath;
   try {
-    return COOKIES && existsSync(COOKIES) ? ["--cookies", COOKIES] : [];
+    if (!COOKIES_SRC || !existsSync(COOKIES_SRC)) {
+      cookiesPath = "";
+      return "";
+    }
+    // Secret files mount read-only, but yt-dlp rewrites the jar -> use a copy.
+    const dest = path.join(os.tmpdir(), "wr-cookies.txt");
+    copyFileSync(COOKIES_SRC, dest);
+    cookiesPath = dest;
   } catch {
-    return [];
+    cookiesPath = COOKIES_SRC;
   }
+  return cookiesPath;
+}
+function cookieArgs() {
+  const p = ensureCookies();
+  return p ? ["--cookies", p] : [];
 }
 const cookiesActive = () => cookieArgs().length > 0;
 
@@ -324,6 +340,27 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(302, { Location: mediaUrl });
       res.end();
       return;
+    }
+    // Diagnostics: list the formats yt-dlp sees for a video (mask cookies).
+    if (url.pathname === "/debug") {
+      const id = (url.searchParams.get("id") || "").trim();
+      const clientArg = url.searchParams.get("client") || CLIENT_SETS[0];
+      if (!id) return sendJson(res, 400, { ok: false, error: "id required" });
+      let output = "";
+      try {
+        output = await runYt([
+          "-F",
+          "--no-playlist",
+          "--no-warnings",
+          "--extractor-args",
+          clientArg,
+          ...cookieArgs(),
+          `https://www.youtube.com/watch?v=${id}`,
+        ]);
+      } catch (e) {
+        output = String(e?.message || e);
+      }
+      return sendJson(res, 200, { ok: true, client: clientArg, cookies: cookiesActive(), output: output.slice(-6000) });
     }
     sendJson(res, 404, { ok: false, error: "not found" });
   } catch (e) {
