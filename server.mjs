@@ -124,10 +124,10 @@ async function resolveAudio(id) {
     let lastErr = null;
     for (const clientArg of CLIENT_SETS) {
       try {
-        // Prefer m4a/AAC for widest browser support.
+        // Prefer m4a/AAC for widest browser support, but accept webm/any audio.
         const args = [
           "-f",
-          "bestaudio[ext=m4a]/bestaudio",
+          "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
           "--extractor-args",
           clientArg,
           "--no-playlist",
@@ -146,6 +146,7 @@ async function resolveAudio(id) {
         if (!url) throw new Error("no stream resolved");
         const entry = { url, ext, expiresAt: Date.now() + RESOLVE_TTL_MS, hit: false };
         cacheSet(resolveCache, id, entry);
+        console.log(`resolve ${id}: ok via ${clientArg} (${ext || "?"})`);
         return entry;
       } catch (e) {
         lastErr = e;
