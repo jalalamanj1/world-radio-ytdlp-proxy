@@ -36,6 +36,10 @@ const PORT = Number(process.env.PORT || 8080);
 const YTDLP = process.env.YTDLP_PATH || "yt-dlp";
 // Optional extra args before the command (e.g. YTDLP_PATH=python YTDLP_ARGS="-m yt_dlp").
 const YTDLP_ARGS = (process.env.YTDLP_ARGS || "").split(" ").filter(Boolean);
+// yt-dlp now needs a JavaScript runtime to solve YouTube's player challenges;
+// without one it returns only storyboards. Node is present wherever this server
+// runs (locally and in the container), so use it by default.
+const JS_RUNTIME = (process.env.YTDLP_JS_RUNTIME || "node").trim();
 
 // A resolved googlevideo URL stays valid for a few hours; an hour is safe.
 const RESOLVE_TTL_MS = Number(process.env.RESOLVE_TTL_MS || 60 * 60 * 1000);
@@ -48,10 +52,11 @@ const PREFETCH = /^(1|true|yes)$/i.test(process.env.PREFETCH || "");
 // blocks some clients on datacenter IPs ("failed to extract player response"),
 // while `android_vr`/`web_embedded` generally work without a PO token.
 const CLIENT_SETS = [
-  "youtube:player_client=android_vr",
-  "youtube:player_client=web_embedded,android_vr",
+  // Web clients give a proper audio-only stream (itag 140) whose URL streams
+  // directly. The android_vr progressive URL now 403s upstream, so keep it last.
   "youtube:player_client=default,web_safari",
-  "youtube:player_client=tv_embedded,web_embedded,mweb,android_vr",
+  "youtube:player_client=web_embedded,web_safari,android_vr",
+  "youtube:player_client=android_vr",
 ];
 // Netscape cookies.txt path. Needed when YouTube bot-checks a datacenter IP
 // ("Sign in to confirm you're not a bot"). Render Secret Files mount at
@@ -130,7 +135,7 @@ function sendJson(res, code, obj) {
 
 function runYt(args) {
   return new Promise((resolve, reject) => {
-    const child = spawn(YTDLP, [...YTDLP_ARGS, ...args], { windowsHide: true });
+    const child = spawn(YTDLP, [...YTDLP_ARGS, "--js-runtimes", JS_RUNTIME, ...args], { windowsHide: true });
     let out = "";
     let err = "";
     child.stdout.on("data", (d) => (out += d));
