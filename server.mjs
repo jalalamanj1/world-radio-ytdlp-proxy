@@ -26,7 +26,7 @@
 
 import http from "node:http";
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -79,6 +79,22 @@ function cookieArgs() {
   return p ? ["--cookies", p] : [];
 }
 const cookiesActive = () => cookieArgs().length > 0;
+// Cookie NAMES only (never values) — tells us if the export is a logged-in session.
+function cookieNames() {
+  const p = ensureCookies();
+  if (!p) return [];
+  try {
+    const names = new Set();
+    for (const line of readFileSync(p, "utf8").split(/\r?\n/)) {
+      if (!line || line.startsWith("#")) continue;
+      const parts = line.split("\t");
+      if (parts.length >= 6) names.add(parts[5]);
+    }
+    return [...names];
+  } catch {
+    return [];
+  }
+}
 
 const MAX_ENTRIES = 500;
 
@@ -360,7 +376,7 @@ const server = http.createServer(async (req, res) => {
       } catch (e) {
         output = String(e?.message || e);
       }
-      return sendJson(res, 200, { ok: true, client: clientArg, cookies: cookiesActive(), output: output.slice(-6000) });
+      return sendJson(res, 200, { ok: true, client: clientArg, cookies: cookiesActive(), cookieNames: cookieNames(), output: output.slice(-6000) });
     }
     sendJson(res, 404, { ok: false, error: "not found" });
   } catch (e) {
