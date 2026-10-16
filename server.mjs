@@ -20,6 +20,7 @@
 //   RESOLVE_TTL_MS   media-url cache lifetime (default 1h)
 //   SEARCH_TTL_MS    search-result cache lifetime (default 10m)
 //   PREFETCH         "1" to warm the top search result's stream in the background
+//   YTDLP_COOKIES    path to a cookies.txt (helps when YouTube bot-checks the IP)
 //
 // Requires the `yt-dlp` binary on PATH (see Dockerfile / README).
 
@@ -39,6 +40,18 @@ const RESOLVE_TTL_MS = Number(process.env.RESOLVE_TTL_MS || 60 * 60 * 1000);
 const SEARCH_TTL_MS = Number(process.env.SEARCH_TTL_MS || 10 * 60 * 1000);
 // Warm the top search result so the first tap starts almost instantly.
 const PREFETCH = /^(1|true|yes)$/i.test(process.env.PREFETCH || "");
+
+// yt-dlp player clients, tried in order until one returns a stream. YouTube
+// blocks some clients on datacenter IPs ("failed to extract player response"),
+// while `android_vr`/`web_embedded` generally work without a PO token.
+const CLIENT_SETS = [
+  "youtube:player_client=android_vr",
+  "youtube:player_client=web_embedded,android_vr",
+  "youtube:player_client=default,web_safari",
+  "youtube:player_client=tv_embedded,web_embedded,mweb,android_vr",
+];
+// Optional Netscape cookies.txt path (helps when YouTube bot-checks the IP).
+const COOKIES = process.env.YTDLP_COOKIES || "";
 
 const MAX_ENTRIES = 500;
 
@@ -96,27 +109,39 @@ async function resolveAudio(id) {
 
   const task = (async () => {
     const page = `https://www.youtube.com/watch?v=${id}`;
-    // Prefer m4a/AAC for widest browser support.
-    const meta = await runYt([
-      "-f",
-      "bestaudio[ext=m4a]/bestaudio",
-      "--extractor-args",
-      "youtube:player_client=default,tv_embedded,web_embedded,ios,android_vr,mweb",
-      "--no-playlist",
-      "--no-warnings",
-      "--print",
-      "%(url)s|%(ext)s",
-      page,
-    ]);
-    const line = meta.trim();
-    // Split on the LAST "|" so a "|" inside the url can't corrupt the parse.
-    const sep = line.lastIndexOf("|");
-    const url = (sep >= 0 ? line.slice(0, sep) : line).trim();
-    const ext = (sep >= 0 ? line.slice(sep + 1) : "").trim();
-    if (!url) throw new Error("no stream resolved");
-    const entry = { url, ext, expiresAt: Date.now() + RESOLVE_TTL_MS, hit: false };
-    cacheSet(resolveCache, id, entry);
-    return entry;
+    console.log(`resolve ${id}: trying ${CLIENT_SETS.length} client set(s)`);
+    let lastErr = null;
+    for (const clientArg of CLIENT_SETS) {
+      try {
+        // Prefer m4a/AAC for widest browser support.
+        const args = [
+          "-f",
+          "bestaudio[ext=m4a]/bestaudio",
+          "--extractor-args",
+          clientArg,
+          "--no-playlist",
+          "--no-warnings",
+          "--print",
+          "%(url)s|%(ext)s",
+        ];
+        if (COOKIES) args.push("--cookies", COOKIES);
+        args.push(page);
+        const meta = await runYt(args);
+        const line = meta.trim();
+        // Split on the LAST "|" so a "|" inside the url can't corrupt the parse.
+        const sep = line.lastIndexOf("|");
+        const url = (sep >= 0 ? line.slice(0, sep) : line).trim();
+        const ext = (sep >= 0 ? line.slice(sep + 1) : "").trim();
+        if (!url) throw new Error("no stream resolved");
+        const entry = { url, ext, expiresAt: Date.now() + RESOLVE_TTL_MS, hit: false };
+        cacheSet(resolveCache, id, entry);
+        return entry;
+      } catch (e) {
+        lastErr = e;
+        console.log(`resolve ${id}: client set failed (${clientArg}) -> ${String(e?.message || e).slice(0, 160)}`);
+      }
+    }
+    throw lastErr || new Error("no stream resolved");
   })();
 
   inflight.set(id, task);
