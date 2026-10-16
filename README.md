@@ -29,16 +29,27 @@ request. `/stream` responses report `X-Cache: HIT | MISS | REFRESH`.
 | `SEARCH_TTL_MS` | `600000` | Search-result cache lifetime |
 | `PREFETCH` | off | `1` warms the top search result's stream in the background |
 
-## Deploy on Render (free, ~1 minute)
+## Deploy on Render (free, ~2 minutes)
 
-1. Click **New → Web Service** in [Render](https://render.com) and connect this repo
-   (or use **New → Blueprint** — it reads `render.yaml`).
-2. Render detects the `Dockerfile` automatically. Choose the **Free** plan.
-3. Deploy, then copy the service URL, e.g. `https://world-radio-ytdlp.onrender.com`.
-4. In the radio app, set the build var `VITE_RADIO_API` to that URL and rebuild.
+1. Sign in to [Render](https://render.com) and click **New → Blueprint**.
+2. Connect this repo. Render reads `render.yaml` and creates the `world-radio-ytdlp`
+   web service (Docker, **Free** plan, health check `/health`, `PREFETCH=1`).
+3. Wait for the first deploy, then copy the service URL, e.g.
+   `https://world-radio-ytdlp.onrender.com`.
+4. Point the radio app at it — either:
+   - write the URL into `endpoint.txt` (the app reads it at runtime, no rebuild), or
+   - set the build var `VITE_RADIO_API` and rebuild the app.
 
-> Free instances sleep after idle; the first request after a pause takes ~30–60s.
-> yt-dlp needs periodic updates — redeploy now and then.
+The push-based service redeploys automatically on every commit to `master`.
+
+> **Free plan sleeps after ~15 min idle** (next request takes ~30–60s). The
+> `.github/workflows/keepalive.yml` workflow pings `/health` every 10 minutes to
+> keep it warm — enable Actions on the repo and it runs automatically.
+>
+> **Datacenter IPs** can trip YouTube's "confirm you're not a bot" on some videos.
+> yt-dlp mitigates this, but if it happens often, export browser cookies to
+> `cookies.txt` and add `--cookies /app/cookies.txt` to `YTDLP_ARGS` (mount it as a
+> secret file). yt-dlp also needs periodic updates — redeploy now and then.
 
 ## Run locally with Docker
 

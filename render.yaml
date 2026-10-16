@@ -6,3 +6,10 @@ services:
     plan: free
     healthCheckPath: /health
     autoDeploy: true
+    envVars:
+      - key: PREFETCH
+        value: "1"
+      - key: RESOLVE_TTL_MS
+        value: "3600000"
+      - key: SEARCH_TTL_MS
+        value: "600000"
