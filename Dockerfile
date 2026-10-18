@@ -20,9 +20,6 @@ WORKDIR /srv
 COPY package.json server.mjs ./
 
 ENV PORT=8080
-# TEMP TEST: point at a nonexistent path so the proxy runs with NO cookies, to
-# see whether the PO-token provider alone is enough on a datacenter IP.
-ENV YTDLP_COOKIES=/nonexistent/cookies.txt
 EXPOSE 8080
 
 # Drop the provider image's own ENTRYPOINT; we start both processes ourselves.
