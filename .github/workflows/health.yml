@@ -1,0 +1,170 @@
+name: proxy health
+
+# Hourly end-to-end probe of the live proxy. When the proxy stops streaming the
+# app does not crash - songs silently fall back to Invidious embeds, which play
+# but cannot be downloaded - so this opens an issue (and GitHub emails it)
+# instead of waiting for someone to notice. The issue closes itself on recovery.
+#
+# Caveat: GitHub disables scheduled workflows after 60 days with no repo
+# activity. If alerts stop arriving, click "Enable workflow" in the Actions tab.
+#
+# Test video: LB72Mbd88mU. If that video is ever deleted or age-restricted,
+# swap STREAM_PROBE_ID below.
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+    inputs:
+      force_fail:
+        description: Pretend the probe failed (exercises the alert path)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: proxy-health
+  cancel-in-progress: false
+
+env:
+  STREAM_PROBE_ID: LB72Mbd88mU
+  ENDPOINT_RAW: https://raw.githubusercontent.com/jalalamanj1/world-radio-ytdlp-proxy/master/endpoint.txt
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    outputs:
+      ok: ${{ steps.stream.outputs.ok }}
+      url: ${{ steps.stream.outputs.url }}
+      code: ${{ steps.stream.outputs.code }}
+    steps:
+      - name: Probe /stream
+        id: stream
+        run: |
+          set -u
+          if [ "${{ inputs.force_fail }}" = "true" ]; then
+            echo "force_fail: skipping probe"
+            echo "url=forced" >> "$GITHUB_OUTPUT"
+            echo "code=forced" >> "$GITHUB_OUTPUT"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          URL="$(curl -fsS --retry 3 --max-time 30 "$ENDPOINT_RAW" | tr -d '[:space:]')"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          if [ -z "$URL" ]; then
+            echo "endpoint.txt is empty"
+            echo "code=none" >> "$GITHUB_OUTPUT"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A healthy proxy answers a ranged request with 206 + audio bytes.
+          # Retry so a Render cold start (~60s) is not mistaken for an outage.
+          CODE=""
+          for i in 1 2 3; do
+            CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 170 -r 0-1023 "$URL/stream?id=$STREAM_PROBE_ID" || true)"
+            echo "attempt $i -> HTTP $CODE"
+            if [ "$CODE" = "206" ] || [ "$CODE" = "200" ]; then
+              echo "ok=true" >> "$GITHUB_OUTPUT"
+              echo "code=$CODE" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "$i" -lt 3 ]; then sleep 25; fi
+          done
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+
+  alert:
+    needs: probe
+    if: needs.probe.outputs.ok != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open alert issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          URL: ${{ needs.probe.outputs.url }}
+          CODE: ${{ needs.probe.outputs.code }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -eu
+          gh label create stream-degraded --repo "$REPO" --color B60205 \
+            --description "The live proxy stopped returning audio" --force >/dev/null 2>&1 || true
+          EXISTING="$(gh issue list --repo "$REPO" --label stream-degraded --state open \
+            --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+          if [ -n "$EXISTING" ]; then
+            echo "issue #$EXISTING is already open - not spamming."
+            exit 0
+          fi
+          BODY="$(cat <<EOF
+          ### What broke
+
+          The live proxy returned **HTTP $CODE** for a ranged audio request (expected 206).
+
+          - endpoint: $URL
+          - checked: $(date -u '+%Y-%m-%d %H:%M UTC')
+          - run log: $RUN
+
+          The app does not crash when this happens: songs silently fall back to Invidious
+          embeds, which stream but cannot be downloaded. Radio, Qur'an and Dailymotion are
+          unaffected.
+
+          ### Most likely cause: expired YouTube cookies
+
+          The proxy needs live YouTube cookies from the throwaway account. Google invalidates
+          them every few months.
+
+          ### Fix (~3 minutes)
+
+          1. On the PC, open **Firefox** (the throwaway YouTube account) and load
+             https://www.youtube.com - confirm you are still signed in. Sign in again if not.
+          2. Run:
+
+             \`\`\`
+             python "C:\\Users\\HP\\AppData\\Local\\Temp\\radio-proxy\\ffextract.py"
+             \`\`\`
+
+             It prints the auth cookies it found and rewrites
+             \`C:\\Users\\HP\\AppData\\Local\\Temp\\radio-proxy\\cookies.txt\`.
+             If it says NOT SIGNED IN YET, sign into YouTube in Firefox first.
+          3. In the Render dashboard: **world-radio-ytdlp-proxy** -> **Environment** ->
+             **Secret Files** -> update \`cookies.txt\` with the new file -> **Save**.
+             Saving triggers a redeploy.
+          4. Wait for the deploy. This workflow runs hourly and closes this issue
+             automatically once streaming works again.
+
+          ### If cookies were not the cause
+
+          - Render service asleep or crashed: check the dashboard logs. Free instances sleep
+            after ~15 min idle; the \`keepalive\` workflow normally prevents that.
+          - \`endpoint.txt\` points at a dead URL.
+          - A YouTube-side change: bump \`yt-dlp\` or \`bgutil-ytdlp-pot-provider\` in the Dockerfile.
+          EOF
+          )"
+          gh issue create --repo "$REPO" \
+            --title "Proxy stopped streaming (HTTP $CODE)" \
+            --label stream-degraded \
+            --body "$BODY"
+
+  recover:
+    needs: probe
+    if: needs.probe.outputs.ok == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close alert issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          EXISTING="$(gh issue list --repo "$REPO" --label stream-degraded --state open \
+            --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+          if [ -z "$EXISTING" ]; then
+            echo "healthy - nothing open."
+            exit 0
+          fi
+          gh issue comment "$EXISTING" --repo "$REPO" \
+            --body "Recovered: \`/stream\` is returning 206 again as of $(date -u '+%Y-%m-%d %H:%M UTC'). Closing."
+          gh issue close "$EXISTING" --repo "$REPO"
