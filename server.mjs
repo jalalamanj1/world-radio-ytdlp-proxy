@@ -62,6 +62,8 @@ const CLIENT_SETS = [
 // ("Sign in to confirm you're not a bot"). Render Secret Files mount at
 // /etc/secrets/<name>, so dropping a secret file named cookies.txt is enough.
 const COOKIES_SRC = process.env.YTDLP_COOKIES || "/etc/secrets/cookies.txt";
+// Bearer token for the /admin/* routes (cookie hot-reload). Unset = disabled.
+const ADMIN_TOKEN = (process.env.ADMIN_TOKEN || "").trim();
 let cookiesPath = null;
 function ensureCookies() {
   if (cookiesPath !== null) return cookiesPath;
@@ -361,6 +363,17 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(302, { Location: mediaUrl });
       res.end();
       return;
+    }
+    // Admin: hot-reload the cookie jar after the refresher rewrites it, so a
+    // token rotation never drops an in-flight stream (no restart needed).
+    if (url.pathname === "/admin/reload-cookies" && req.method === "POST") {
+      if (!ADMIN_TOKEN) return sendJson(res, 403, { ok: false, error: "admin disabled" });
+      if (req.headers["x-admin-token"] !== ADMIN_TOKEN) {
+        return sendJson(res, 401, { ok: false, error: "bad token" });
+      }
+      cookiesPath = null;
+      const p = ensureCookies();
+      return sendJson(res, 200, { ok: true, cookies: !!p, cookieNames: cookieNames() });
     }
     // Diagnostics: list the formats yt-dlp sees for a video (mask cookies).
     if (url.pathname === "/debug") {

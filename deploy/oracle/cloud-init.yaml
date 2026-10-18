@@ -1,0 +1,9 @@
+#cloud-config
+# Bootstrap for the World Radio proxy on an Oracle Cloud Always Free VM.
+#
+# Paste this into Advanced options -> Management -> "Cloud-init script" when
+# creating the instance (Ubuntu 24.04, Ampere A1). It installs the full stack
+# and logs to /root/wr-setup.log.
+runcmd:
+  - [ bash, -lc, "curl -fsSL https://raw.githubusercontent.com/jalalamanj1/world-radio-ytdlp-proxy/master/deploy/oracle/setup.sh -o /root/setup.sh" ]
+  - [ bash, -lc, "nohup bash /root/setup.sh > /root/wr-setup.log 2>&1 &" ]
