@@ -111,6 +111,7 @@ User=wr
 WorkingDirectory=/opt/wr/app
 EnvironmentFile=/etc/wr/wr.env
 Environment=PORT=8080
+Environment=HOST=127.0.0.1
 Environment=YTDLP_PATH=/opt/wr/venv/bin/yt-dlp
 Environment=YTDLP_JS_RUNTIME=node
 Environment=YTDLP_COOKIES=/opt/wr/cookies.txt

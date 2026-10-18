@@ -32,6 +32,9 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
+// Render routes traffic to the container, so it must bind all interfaces
+// (the default). On a VM a tunnel runs alongside us, so loopback is enough.
+const HOST = process.env.HOST || "0.0.0.0";
 const PORT = Number(process.env.PORT || 8080);
 const YTDLP = process.env.YTDLP_PATH || "yt-dlp";
 // Optional extra args before the command (e.g. YTDLP_PATH=python YTDLP_ARGS="-m yt_dlp").
@@ -403,6 +406,6 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`World Radio yt-dlp proxy listening on :${PORT}${PREFETCH ? " (prefetch on)" : ""}`);
+server.listen(PORT, HOST, () => {
+  console.log(`World Radio yt-dlp proxy listening on ${HOST}:${PORT}${PREFETCH ? " (prefetch on)" : ""}`);
 });
