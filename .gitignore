@@ -1,3 +1,7 @@
 node_modules/
 .env
 *.log
+
+# Never commit YouTube session cookies - supplied via Render Secret File.
+cookies.txt
+**/cookies.txt
